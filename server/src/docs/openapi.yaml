@@ -1,0 +1,673 @@
+openapi: 3.1.0
+info:
+  title: Lost & Found API
+  version: 1.0.0
+  description: |
+    REST API for reporting lost and found items, claiming found items and
+    reviewing potential matches.
+
+    **Authentication:** a JWT is stored in an HTTP-only `token` cookie set by
+    `/auth/login` or `/auth/register`.
+
+    **CSRF:** every POST/PATCH/DELETE must send the value of the `csrf_token`
+    cookie in the `X-CSRF-Token` header. Call `GET /auth/csrf` first.
+
+    **Responses:** success → `{ success: true, data, meta? }`,
+    error → `{ success: false, error: { code, message, details? } }`.
+servers:
+  - url: /api
+tags:
+  - name: Auth
+  - name: Items
+  - name: Claims
+  - name: Notifications
+  - name: Admin
+  - name: System
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-f0-9]{24}$' }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 12 }
+  responses:
+    BadRequest:
+      description: Validation failed or malformed request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Not logged in or session expired
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Logged in but not allowed (or CSRF token missing/invalid)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: The resource is not in a state that allows this action
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, const: false }
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  location: { type: string }
+                  path: { type: string }
+                  message: { type: string }
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [user, admin] }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    Category:
+      type: string
+      enum: [electronics, wallets-and-cards, keys, bags, clothing, jewellery, documents, pets, other]
+    Item:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [lost, found] }
+        title: { type: string }
+        description: { type: string }
+        category: { $ref: '#/components/schemas/Category' }
+        date: { type: string, format: date-time }
+        location: { type: string }
+        imageUrl: { type: [string, 'null'], example: /api/uploads/0123456789abcdef0123456789abcdef.jpg }
+        status: { type: string, enum: [open, resolved] }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+        owner:
+          type: object
+          description: Public owner info. Never includes contact details.
+          properties:
+            id: { type: string }
+            name: { type: string }
+        isOwner: { type: boolean }
+        removed: { type: boolean, description: Only for the owner and admins }
+        removedReason: { type: [string, 'null'], description: Only for the owner and admins }
+        flagCount: { type: integer, description: Admins only }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ItemForm:
+      type: object
+      required: [type, title, description, category, date, location]
+      properties:
+        type: { type: string, enum: [lost, found] }
+        title: { type: string, minLength: 3, maxLength: 120 }
+        description: { type: string, minLength: 10, maxLength: 2000 }
+        category: { $ref: '#/components/schemas/Category' }
+        date: { type: string, format: date, description: Day the item was lost/found. Not in the future. }
+        location: { type: string, minLength: 2, maxLength: 120 }
+        image:
+          type: string
+          format: binary
+          description: Optional JPEG, PNG or WebP, max 5 MB (configurable).
+    Claim:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [pending, accepted, rejected, withdrawn] }
+        message: { type: string, description: Private. Visible to the claimant, the report owner and admins. }
+        decisionNote: { type: [string, 'null'] }
+        decidedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        item:
+          type: object
+          properties:
+            id: { type: string }
+            title: { type: string }
+            type: { type: string }
+            status: { type: string }
+        claimant:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+            email: { type: string, description: Only after the claim is accepted, for the report owner }
+        ownerContact:
+          type: object
+          description: Only for the claimant, only after acceptance
+          properties:
+            name: { type: string }
+            email: { type: string }
+        viewerRole: { type: string, enum: [claimant, owner, admin] }
+    Match:
+      type: object
+      properties:
+        label: { type: string, const: Potential match }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        reasons: { type: array, items: { type: string } }
+        item: { $ref: '#/components/schemas/Item' }
+    Notification:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [claim_received, claim_accepted, claim_rejected, potential_match, report_removed] }
+        title: { type: string }
+        body: { type: [string, 'null'] }
+        link: { type: [string, 'null'] }
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: Health check (includes database connectivity)
+      responses:
+        '200': { description: OK }
+        '503': { description: Database unavailable }
+
+  /auth/csrf:
+    get:
+      tags: [Auth]
+      summary: Issue a CSRF token (also set as the csrf_token cookie)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { type: object, properties: { csrfToken: { type: string } } }
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account and start a session
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 2, maxLength: 60 }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, description: Must contain a letter and a number }
+      responses:
+        '201': { description: Registered; sets the token cookie }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { description: Too many attempts }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      security: [{ csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200': { description: Logged in; sets the token cookie }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { description: Too many attempts }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (clears the session cookie)
+      security: [{ csrfHeader: [] }]
+      responses:
+        '200': { description: Logged out }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: object, properties: { user: { $ref: '#/components/schemas/User' } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /items:
+    get:
+      tags: [Items]
+      summary: Browse, search and filter public reports
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 100 }, description: Full-text search }
+        - { name: type, in: query, schema: { type: string, enum: [lost, found] } }
+        - { name: category, in: query, schema: { $ref: '#/components/schemas/Category' } }
+        - { name: status, in: query, schema: { type: string, enum: [open, resolved, all], default: open } }
+        - { name: location, in: query, schema: { type: string }, description: Case-insensitive substring }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: sort, in: query, schema: { type: string, enum: [newest, oldest, date], default: newest } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { type: array, items: { $ref: '#/components/schemas/Item' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      tags: [Items]
+      summary: Create a lost or found report
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/ItemForm' }
+      responses:
+        '201': { description: Created }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { description: Image too large }
+  /items/mine:
+    get:
+      tags: [Items]
+      summary: The current user's reports (with pending claim counts)
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [open, resolved, all], default: all } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /items/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Items]
+      summary: Report details
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Item' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Items]
+      summary: Edit your own report (any subset of fields; removeImage=true deletes the image)
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ItemForm'
+                - type: object
+                  properties:
+                    removeImage: { type: string, enum: ['true', 'false'] }
+      responses:
+        '200': { description: Updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Items]
+      summary: Delete your own report (admins may delete any report)
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /items/{id}/resolve:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Items]
+      summary: Mark your report as resolved (closes pending claims)
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '200': { description: Resolved }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /items/{id}/flag:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Items]
+      summary: Flag a report as inappropriate (once per user)
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: { reason: { type: string, minLength: 5, maxLength: 300 } }
+      responses:
+        '201': { description: Flagged }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /items/{id}/matches:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Items]
+      summary: Potential matches for your report (owner or admin only)
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200':
+          description: Sorted by score, highest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Match' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /items/{id}/claims:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Claims]
+      summary: Claims on your report (owner or admin only)
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Claim' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Claims]
+      summary: Claim a found item
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  minLength: 20
+                  maxLength: 1000
+                  description: Details only the real owner would know.
+      responses:
+        '201': { description: Claim submitted }
+        '400': { description: Not a found report, or invalid message }
+        '403': { description: You cannot claim your own report }
+        '409': { description: Duplicate pending claim, or item already resolved }
+  /claims/mine:
+    get:
+      tags: [Claims]
+      summary: Claims you submitted
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, accepted, rejected, withdrawn, all] } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { description: OK }
+  /claims/received:
+    get:
+      tags: [Claims]
+      summary: Claims on your reports
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, accepted, rejected, withdrawn, all] } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { description: OK }
+  /claims/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Claims]
+      summary: A single claim (claimant, report owner or admin)
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /claims/{id}/decision:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Claims]
+      summary: Accept or reject a claim (report owner only)
+      description: Accepting resolves the report and rejects all other pending claims on it.
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [accepted, rejected] }
+                note: { type: string, maxLength: 500 }
+      responses:
+        '200': { description: Decided }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /claims/{id}/withdraw:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Claims]
+      summary: Withdraw your pending claim
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '200': { description: Withdrawn }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: Your notifications (newest first)
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: unreadOnly, in: query, schema: { type: string, enum: ['true', 'false'] } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Notification' } }
+                  meta:
+                    allOf:
+                      - $ref: '#/components/schemas/PageMeta'
+                      - type: object
+                        properties: { unread: { type: integer } }
+  /notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Number of unread notifications
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200': { description: OK }
+  /notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark all as read
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '200': { description: OK }
+  /notifications/{id}/read:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Notifications]
+      summary: Mark one notification as read
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/stats:
+    get:
+      tags: [Admin]
+      summary: Counts for the admin dashboard
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List users
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: role, in: query, schema: { type: string, enum: [user, admin] } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/users/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    patch:
+      tags: [Admin]
+      summary: Activate or deactivate a user
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [isActive]
+              properties: { isActive: { type: boolean } }
+      responses:
+        '200': { description: Updated }
+        '400': { description: Cannot deactivate yourself }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/items:
+    get:
+      tags: [Admin]
+      summary: All reports including removed ones
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - { name: view, in: query, schema: { type: string, enum: [all, flagged, removed], default: all } }
+        - { name: q, in: query, schema: { type: string } }
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/Limit' }
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /admin/items/{id}/remove:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin]
+      summary: Remove (hide) an inappropriate report
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: { reason: { type: string, minLength: 3, maxLength: 300 } }
+      responses:
+        '200': { description: Removed }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/items/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin]
+      summary: Restore a removed report
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '200': { description: Restored }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /admin/items/{id}/dismiss-flags:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Admin]
+      summary: Clear all flags on a report
+      security: [{ cookieAuth: [], csrfHeader: [] }]
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /uploads/{key}:
+    get:
+      tags: [Items]
+      summary: Serve an uploaded image
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{32}\.(jpg|png|webp)$' }
+      responses:
+        '200': { description: Image bytes }
+        '404': { description: Not found }

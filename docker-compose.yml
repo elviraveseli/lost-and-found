@@ -1,0 +1,36 @@
+# Local, production-like stack: MongoDB + the app (API serving the built client).
+#   docker compose up --build      -> http://localhost:4000
+# Secrets come from your .env file (see .env.example); nothing is hard-coded here.
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017/lost_found
+      APP_URL: http://localhost:4000
+      # Local stack runs over plain HTTP. Behind HTTPS in real production the
+      # cookies are sent with the Secure flag automatically (NODE_ENV=production).
+    ports:
+      - "4000:4000"
+    volumes:
+      - uploads:/app/server/storage/uploads
+
+volumes:
+  mongo-data:
+  uploads:
